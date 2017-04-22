@@ -1,23 +1,29 @@
 /*************************************************************************
-* Main file for the kilo terminal text editor.
-* Visit http://viewsourcecode.org/snaptoken/kilo/ for the tutorial.
-*
-* FILENAME : kilo.c
-*
-* DESCRIPTION :
-*       I'm up to chapter 3 step 46.
-* 
-* AUTHOR :  Jarrod N. Bakker    START DATE :    06/04/2016
-*
-**/
+ * Main file for the kilo terminal text editor.
+ * Visit http://viewsourcecode.org/snaptoken/kilo/ for the tutorial.
+ *
+ * FILENAME : kilo.c
+ *
+ * DESCRIPTION :
+ *       I'm up to chapter 4 step 66.
+ * 
+ * AUTHOR :  Jarrod N. Bakker    START DATE :    06/04/2016
+ *
+ */
 
 /*** includes ***/
+
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+
 #include<ctype.h>
 #include<errno.h>
 #include<stdio.h>
 #include<stdlib.h>
 #include<string.h>
 #include<sys/ioctl.h>
+#include<sys/types.h>
 #include<termios.h>
 #include<unistd.h>
 
@@ -27,12 +33,31 @@
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 
+enum editorKey {
+    ARROW_LEFT = 1000,
+    ARROW_RIGHT,
+    ARROW_UP,
+    ARROW_DOWN,
+    DEL_KEY,
+    HOME_KEY,
+    END_KEY,
+    PAGE_UP,
+    PAGE_DOWN
+};
+
 /*** data ***/
+
+typedef struct erow {
+    int size;
+    char *chars;
+} erow;
 
 struct editorConfig {
     int cx, cy;
     int screenRows;
     int screenCols;
+    int numRows;
+    erow *row;
     struct termios orig_termios;
 };
 
@@ -84,15 +109,74 @@ void enableRawMode() {
 /**
  * Read a keypress and return it.
  *
- *  return: A char that has been entered by the user.
+ *  return: A char that has been entered by the user, encoded as an int.
  */
-char editorReadKey() {
+int editorReadKey() {
     int nread;
     char c;
     while ((nread = read(STDIN_FILENO, &c, 1)) != 1)
         if (nread == -1 && errno != EAGAIN)
             die("editorReadKey: read");
-    return c;
+    
+    if (c == '\x1b') {
+        char seq[3];
+
+        if (read(STDIN_FILENO, &seq[0], 1) != 1)
+            return '\x1b';
+        if (read(STDIN_FILENO, &seq[1], 1) != 1)
+            return '\x1b';
+
+        if (seq[0] == '[') {
+            if (seq[1] >= '0' && seq[1] <= '9') {
+                if (read(STDIN_FILENO, &seq[2], 1) != 1)
+                    return '\x1b';
+                if (seq[2] == '~') {
+                    switch (seq[1]) {
+                        case '1':
+                            return HOME_KEY;
+                        case '3':
+                            return DEL_KEY;
+                        case '4':
+                            return END_KEY;
+                        case '5':
+                            return PAGE_UP;
+                        case '6':
+                            return PAGE_DOWN;
+                        case '7':
+                            return HOME_KEY;
+                        case '8':
+                            return END_KEY;
+                    }
+                }
+            } else {
+                switch (seq[1]) {
+                    case 'A':
+                        return ARROW_UP;
+                    case 'B': 
+                        return ARROW_DOWN;
+                    case 'C':
+                        return ARROW_RIGHT;
+                    case 'D':
+                        return ARROW_LEFT;
+                    case 'H':
+                        return HOME_KEY;
+                    case 'F':
+                        return END_KEY;
+                }
+            }
+        } else if (seq[0] == 'O') {
+            switch (seq[1]) {
+                case 'H':
+                    return HOME_KEY;
+                case 'F':
+                    return END_KEY;
+            }
+        }
+
+        return '\x1b';
+    } else {
+        return c;
+    }
 }
 
 /**
@@ -147,6 +231,50 @@ int getWindowSize(int *rows, int *cols) {
     }
 }
 
+/*** row operations ***/
+
+/**
+ * Allocate memory for a row of text.
+ *
+ * param s: Row of text to add.
+ * param len: Length of the row.
+ */
+void editorAppendRow(char *s, size_t len) {
+    E.row = realloc(E.row, sizeof(erow) * (E.numRows + 1));
+
+    int at = E.numRows;
+    E.row[at].size = len;
+    E.row[at].chars = malloc(len + 1);
+    memcpy(E.row[at].chars, s, len);
+    E.row[at].chars[len] = '\0';
+    E.numRows++;
+}
+
+/*** file i/o ***/
+
+/**
+ * Open and read a file from disk.
+ *
+ * param filename: Name of a file being opened and read.
+ */
+void editorOpen(char *filename) {
+    FILE *fp = fopen(filename, "r");
+    if (!fp)
+        die("editorOpen: fopen");
+
+    char *line = NULL;
+    size_t linecap = 0;
+    ssize_t linelen;
+    while((linelen = getline(&line, &linecap, fp)) != -1) {
+        while (linelen > 0 && (line[linelen - 1] == '\n' ||
+                               line[linelen - 1] == '\r'))
+            linelen--;
+        editorAppendRow(line, linelen);
+    }
+    free(line);
+    fclose(fp); 
+}
+
 /*** append buffer ***/
 
 struct abuf{
@@ -191,23 +319,30 @@ void abFree(struct abuf *ab) {
  */
 void editorDrawRows(struct abuf *ab) {
     int y;
-    for (y = 0; y < E.screenRows; y++){
-        if (y == E.screenRows/3){
-            char welcome[80];
-            int welcomelen = snprintf(welcome, sizeof(welcome),
-                "Kilo editor -- version %s", KILO_VERSION);
-            if (welcomelen > E.screenCols)
-                welcomelen = E.screenCols;
-            int padding = (E.screenCols - welcomelen)/2;
-            if (padding) {
+    for (y = 0; y < E.screenRows; y++) {
+        if (y >= E.numRows) {
+            if (E.numRows == 0 && y == E.screenRows/3) {
+                char welcome[80];
+                int welcomelen = snprintf(welcome, sizeof(welcome),
+                    "Kilo editor -- version %s", KILO_VERSION);
+                if (welcomelen > E.screenCols)
+                    welcomelen = E.screenCols;
+                int padding = (E.screenCols - welcomelen)/2;
+                if (padding) {
+                    abAppend(ab, "~", 1);
+                    padding--;
+                }
+                while (padding--)
+                    abAppend(ab, " ", 1);
+                abAppend(ab, welcome, welcomelen);
+            } else {
                 abAppend(ab, "~", 1);
-                padding--;
             }
-            while (padding--)
-                abAppend(ab, " ", 1);
-            abAppend(ab, welcome, welcomelen);
         } else {
-            abAppend(ab, "~", 1);
+            int len = E.row[y].size;
+            if (len > E.screenCols)
+                len = E.screenCols;
+            abAppend(ab, E.row[y].chars, len);
         }
         
         abAppend(ab, "\x1b[K", 3); // clear the rest this line
@@ -242,21 +377,25 @@ void editorRefreshScreen() {
 /**
  * Move the cursor given a specific keypress. 
  *
- * param key: A key that has been pressed.
+ * param key: A key that has been pressed, encoded as an int.
  */
-void editorMoveCursor(char key) {
+void editorMoveCursor(int key) {
     switch (key) {
-        case 'a':
-            E.cx--;
+        case ARROW_LEFT:
+            if (E.cx != 0)
+                E.cx--;
             break;
-        case 'd':
-            E.cx++;
+        case ARROW_RIGHT:
+            if (E.cx != E.screenCols - 1)
+                E.cx++;
             break;
-        case 'w':
-            E.cy--;
+        case ARROW_UP:
+            if (E.cy != 0)
+                E.cy--;
             break;
-        case 's':
-            E.cy++;
+        case ARROW_DOWN:
+            if (E.cy != E.screenRows - 1)
+                E.cy++;
             break;
     }
 }
@@ -265,7 +404,7 @@ void editorMoveCursor(char key) {
  * Wait for a keypress then handle it.
  */
 void editorProcessKeypress() {
-    char c = editorReadKey();
+    int c = editorReadKey();
 
     switch (c) {
         case CTRL_KEY('q'):
@@ -274,10 +413,27 @@ void editorProcessKeypress() {
             exit(0);
             break;
 
-        case 'w':
-        case 's':
-        case 'a':
-        case 'd':
+        case HOME_KEY:
+            E.cx = 0;
+            break;
+
+        case END_KEY:
+            E.cx = E.screenCols - 1;
+            break;
+
+        case PAGE_UP:
+        case PAGE_DOWN:
+            {
+                int times = E.screenRows;
+                while (times--)
+                    editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+            }
+            break;
+
+        case ARROW_UP:
+        case ARROW_DOWN:
+        case ARROW_LEFT:
+        case ARROW_RIGHT:
             editorMoveCursor(c);
             break;
     }
@@ -291,16 +447,20 @@ void editorProcessKeypress() {
 void initEditor() {
     E.cx = 0;
     E.cy = 0;
+    E.numRows = 0;
+    E.row = NULL;
 
     if (getWindowSize(&E.screenRows, &E.screenCols) == -1)
         die("initEditor: getWindowSize");
 }
 
-int main() {
+int main(int argc, char **argv) {
     enableRawMode();
     initEditor();
+    if (argc >= 2)
+        editorOpen(argv[1]);
 
-    while(1){
+    while (1) {
         editorRefreshScreen();
         editorProcessKeypress();
     }
