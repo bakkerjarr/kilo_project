@@ -5,7 +5,7 @@
  * FILENAME : kilo.c
  *
  * DESCRIPTION :
- *       I'm up to chapter 6 step 131.
+ *       I'm up to chapter 7 step 142.
  * 
  * AUTHOR :  Jarrod N. Bakker    START DATE :    06/04/2016
  *
@@ -82,7 +82,7 @@ struct editorConfig E;
 
 void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
-char *editorPrompt(char *prompt);
+char *editorPrompt(char *prompt, void (*callback)(char *, int));
 
 /*** terminal ***/
 
@@ -258,7 +258,7 @@ int getWindowSize(int *rows, int *cols) {
  * Convert a chars index into a render index.
  *
  * param row: A line in the file.
- * param cx: The number of chars in row.
+ * param cx: Chars index.
  */
 int editorRowCxToRx(erow *row, int cx) {
     int rx = 0;
@@ -269,6 +269,26 @@ int editorRowCxToRx(erow *row, int cx) {
         rx++;
     }
     return rx;
+}
+
+/**
+ * Convert a render index into a chars index.
+ *
+ * param row: A line in the file.
+ * param rx: Render index.
+ */
+int editorRowRxToCx(erow *row, int rx) {
+    int curRx = 0;
+    int cx;
+    for (cx = 0; cx < row->size; cx++) {
+        if (row->chars[cx] == '\t')
+            curRx += (KILO_TAB_STOP - 1) - (curRx % KILO_TAB_STOP);
+        curRx++;
+
+        if (curRx > rx)
+            return cx;
+    }
+    return cx;
 }
 
 /**
@@ -513,7 +533,7 @@ void editorOpen(char *filename) {
  */
 void editorSave() {
     if (E.filename == NULL) {
-        E.filename = editorPrompt("Save as: %s (ESC to cancel)");
+        E.filename = editorPrompt("Save as: %s (ESC to cancel)", NULL);
         if (E.filename == NULL) {
             editorSetStatusMessage("Save aborted");
             return;
@@ -539,6 +559,76 @@ void editorSave() {
 
     free(buf);
     editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
+}
+
+/*** find ***/
+
+/**
+ * A callback function for incremental searching through the file.
+ *
+ * param query: The searching query.
+ * param key: The keypress.
+ */
+void editorFindCallback(char *query, int key) {
+    static int lastMatch = -1;
+    static int direction = 1;
+
+    if (key == '\r' || key == '\x1b') {
+        lastMatch = -1;
+        direction = 1;
+        return;
+    } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+        direction = 1;
+    } else if (key == ARROW_LEFT || key == ARROW_UP) {
+        direction = -1;
+    } else {
+        lastMatch = -1;
+        direction = 1;
+    }
+    
+    if (lastMatch == -1)
+        direction = 1;
+    int current = lastMatch;
+    int i;
+    for (i = 0; i < E.numRows; i++) {
+        current += direction;
+        if (current == -1)
+            current = E.numRows - 1;
+        else if (current == E.numRows)
+            current = 0;
+
+        erow *row = &E.row[current];
+        char *match = strstr(row->render, query);
+        if (match) {
+            lastMatch = current;
+            E.cy = current;
+            E.cx = editorRowRxToCx(row, match - row->render);
+            E.rowOff = E.numRows;
+            break;
+        }
+    }
+}
+
+/**
+ * Prompt the user for a string and search through the text.
+ */
+void editorFind() {
+    int savedCx = E.cx;
+    int savedCy = E.cy;
+    int savedColOff = E.colOff;
+    int savedRowOff = E.rowOff;
+
+    char *query = editorPrompt("Search: %s (Use ESC/Arrows/Enter)",
+                               editorFindCallback);
+
+    if (query) {
+        free(query);
+    } else {
+        E.cx = savedCx;
+        E.cy = savedCy;
+        E.colOff = savedColOff;
+        E.rowOff = savedRowOff;
+    }
 }
 
 /*** append buffer ***/
@@ -727,9 +817,10 @@ void editorSetStatusMessage(const char *fmt, ...) {
  * Display a prompt to the user.
  *
  * param prompt: Text to display to the user.
+ * param callback: A callback function for incremental searching.
  * return: User input.
  */
-char *editorPrompt(char *prompt) {
+char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
     size_t bufsize = 128;
     char *buf = malloc(bufsize);
 
@@ -746,11 +837,15 @@ char *editorPrompt(char *prompt) {
                 buf[--buflen] = '\0';
         } else if (c == '\x1b'){
             editorSetStatusMessage("");
+            if (callback)
+                callback(buf, c);
             free(buf);
             return NULL;
          } else if (c == '\r') {
             if (buflen != 0) {
                 editorSetStatusMessage("");
+                if (callback)
+                    callback(buf, c);
                 return buf;
             }
         } else if (!iscntrl(c) && c < 128) {
@@ -761,6 +856,9 @@ char *editorPrompt(char *prompt) {
             buf[buflen++] = c;
             buf[buflen] = '\0';
         }
+
+        if (callback)
+            callback(buf, c);
     }
 }
 
@@ -844,6 +942,10 @@ void editorProcessKeypress() {
                 E.cx = E.row[E.cy].size;
             break;
 
+        case CTRL_KEY('f'):
+            editorFind();
+            break;
+    
         case BACKSPACE:
         case CTRL_KEY('h'):
         case DEL_KEY:
@@ -917,7 +1019,7 @@ int main(int argc, char **argv) {
     if (argc >= 2)
         editorOpen(argv[1]);
 
-    editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit");
+    editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
 
     while (1) {
         editorRefreshScreen();
