@@ -5,7 +5,7 @@
  * FILENAME : kilo.c
  *
  * DESCRIPTION :
- *       I'm up to chapter 7 step 175.
+ *       A complete implementation of the kilo text editor.
  * 
  * AUTHOR :  Jarrod N. Bakker    START DATE :    06/04/2016
  *
